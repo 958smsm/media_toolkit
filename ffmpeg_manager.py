@@ -9,6 +9,7 @@ messages, codec selection, and low-memory encoder settings.
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 import subprocess
@@ -104,6 +105,74 @@ def auto_video_kbps(
         quality_ceiling = {"low": 0.75, "medium": 1.00, "high": 1.15}[quality_key]
         estimated = min(estimated, max(160, int(round(source * quality_ceiling))))
     return estimated
+
+
+def _parse_ffprobe_rate(value: Any) -> float:
+    if value in (None, "", "N/A", "0/0"):
+        return 0.0
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value)
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            return float(numerator) / float(denominator) if float(denominator) else 0.0
+        return float(text)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
+def ffprobe_video(
+    path: os.PathLike[str] | str,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    """Return basic metadata for the first video stream in a media file."""
+    video_path = Path(path)
+    command = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries",
+        "stream=codec_name,width,height,avg_frame_rate,r_frame_rate,nb_frames,duration:format=duration,size",
+        "-of", "json", str(video_path),
+    ]
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout,
+    )
+    if result.returncode != 0:
+        error = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(error or f"ffprobe exited with {result.returncode}")
+
+    data = json.loads(result.stdout.decode("utf-8", errors="replace") or "{}")
+    streams = data.get("streams") or []
+    if not streams:
+        raise RuntimeError("no video stream")
+
+    stream = streams[0]
+    media_format = data.get("format") or {}
+    duration = 0.0
+    for candidate in (stream.get("duration"), media_format.get("duration")):
+        try:
+            duration = max(duration, float(candidate))
+        except (TypeError, ValueError):
+            pass
+    fps = _parse_ffprobe_rate(stream.get("avg_frame_rate")) or _parse_ffprobe_rate(
+        stream.get("r_frame_rate")
+    )
+    try:
+        frame_count = int(stream.get("nb_frames") or 0)
+    except (TypeError, ValueError):
+        frame_count = 0
+    return {
+        "codec": stream.get("codec_name"),
+        "width": int(stream.get("width") or 0),
+        "height": int(stream.get("height") or 0),
+        "fps": fps,
+        "frames": frame_count,
+        "duration": duration,
+        "size": int(media_format.get("size") or video_path.stat().st_size),
+    }
 
 
 class FFmpegPipeWriter:
@@ -416,3 +485,128 @@ class FFmpegPipeWriter:
         else:
             self.abort()
         return False
+
+# --- Legacy Utilities (Restored for video_compressor.py) ---
+
+CODEC_ENCODERS = {
+    "h264": ("libx264", ()),
+    "hevc": ("libx265", ("-tag:v", "hvc1")),
+    "av1": ("libaom-av1", ("-tag:v", "av01")),
+}
+
+class FFmpegError(RuntimeError):
+    pass
+
+def normalize_codec(codec_family: str | None) -> str:
+    codec = (codec_family or "h264").strip().lower()
+    codec = {"h265": "hevc", "x264": "h264", "x265": "hevc"}.get(codec, codec)
+    if codec not in CODEC_ENCODERS:
+        supported = ", ".join(CODEC_ENCODERS)
+        raise ValueError(f"Unsupported codec {codec_family!r}; choose {supported}.")
+    return codec
+
+def normalize_quality(quality: str | None) -> str:
+    normalized = (quality or "medium").strip().lower().replace(" ", "-")
+    if normalized not in {"low", "medium", "high", "very-high"}:
+        raise ValueError(f"Unsupported quality {quality!r}; choose low, medium, high, or very-high.")
+    return normalized
+
+def require_executable(binary: str) -> str:
+    import shutil
+    candidate = Path(binary).expanduser()
+    if candidate.parent != Path(".") and candidate.is_file():
+        return str(candidate.resolve())
+    resolved = shutil.which(binary)
+    if resolved:
+        return resolved
+    raise FileNotFoundError(f"Required executable {binary!r} was not found on PATH.")
+
+def run_capture(command: Sequence[str]) -> str:
+    rendered_command = [str(part) for part in command]
+    result = subprocess.run(
+        rendered_command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise FFmpegError(
+            f"Command failed with exit code {result.returncode}: "
+            f"{subprocess.list2cmdline(rendered_command)}\n"
+            f"{result.stderr.strip()}"
+        )
+    return result.stdout
+
+def try_run_capture(command: Sequence[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            [str(part) for part in command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return (result.stdout or "") + (result.stderr or "")
+
+def ffmpeg_supports_hwaccel(name: str, *, ffmpeg_binary: str = "ffmpeg") -> bool:
+    output = try_run_capture([ffmpeg_binary, "-hide_banner", "-hwaccels"])
+    requested = name.strip().lower()
+    return bool(output and any(line.strip().lower() == requested for line in output.splitlines()))
+
+def nvidia_gpu_present(*, nvidia_smi_binary: str = "nvidia-smi") -> bool:
+    output = try_run_capture([nvidia_smi_binary, "-L"])
+    if output and "gpu" in output.lower():
+        return True
+    if os.name != "nt":
+        return False
+    candidates = (
+        Path(r"C:\Windows\System32\nvidia-smi.exe"),
+        Path(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"),
+    )
+    for executable in candidates:
+        if executable.is_file():
+            output = try_run_capture([str(executable), "-L"])
+            if output and "gpu" in output.lower():
+                return True
+    adapters = try_run_capture([
+        "powershell", "-NoProfile", "-Command",
+        "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"
+    ])
+    return bool(adapters and "nvidia" in adapters.lower())
+
+_CUDA_PROBE_CACHE: dict[tuple[str, str], bool] = {}
+def cuda_works_for_file(input_path: Path | str, *, ffmpeg_binary: str = "ffmpeg") -> bool:
+    path = str(Path(input_path).expanduser().resolve())
+    cache_key = (ffmpeg_binary, path)
+    if cache_key in _CUDA_PROBE_CACHE:
+        return _CUDA_PROBE_CACHE[cache_key]
+    result = subprocess.run(
+        [ffmpeg_binary, "-hide_banner", "-v", "error", "-hwaccel", "cuda",
+         "-i", path, "-map", "0:v:0", "-frames:v", "1", "-an", "-f", "null", "-"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+    )
+    stderr = result.stderr or ""
+    failure_markers = ("Failed setup for format cuda", "hwaccel initialisation returned error",
+                       "Hardware is lacking required capabilities", "not supported with this chroma format")
+    supported = result.returncode == 0 and not any(m in stderr for m in failure_markers)
+    _CUDA_PROBE_CACHE[cache_key] = supported
+    return supported
+
+def hardware_acceleration_args(input_path: Path | str, mode: str = "auto", *, ffmpeg_binary: str = "ffmpeg") -> list[str]:
+    selected = (mode or "auto").strip().lower()
+    if selected in {"cpu", "off"}: return []
+    if selected not in {"auto", "cuda"}: raise ValueError("Hardware mode must be auto, cpu, off, or cuda.")
+    has_cuda = ffmpeg_supports_hwaccel("cuda", ffmpeg_binary=ffmpeg_binary)
+    has_gpu = nvidia_gpu_present()
+    if selected == "cuda":
+        if not has_cuda or not has_gpu:
+            raise FFmpegError("CUDA requested but not supported/detected.")
+        return ["-hwaccel", "cuda"]
+    if not has_cuda or not has_gpu: return []
+    if not cuda_works_for_file(input_path, ffmpeg_binary=ffmpeg_binary): return []
+    return ["-hwaccel", "cuda"]

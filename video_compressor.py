@@ -335,8 +335,8 @@ def compress_video(
         output_width,
         output_height,
         source_info.fps,
-        codec,
-        quality,
+        codec_family=codec,
+        quality=quality,
     )
     hardware_args = hardware_acceleration_args(
         source,

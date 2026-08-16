@@ -9,3 +9,4 @@ trash/
 yt_videos/
 *.ffmpeg.log
 *.partial.*
+/args.yaml
