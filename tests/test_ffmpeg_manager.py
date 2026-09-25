@@ -27,6 +27,35 @@ class BitrateTests(unittest.TestCase):
             "very-high",
         )
 
+    def test_auto_video_kbps_accepts_legacy_positional_arguments(self) -> None:
+        expected = ffmpeg_manager.auto_video_kbps(
+            1920, 1080, 30, codec_family="hevc", quality="medium"
+        )
+        legacy = ffmpeg_manager.auto_video_kbps(
+            1920, 1080, 30, "hevc", "medium"
+        )
+        self.assertEqual(legacy, expected)
+
+
+class PipeWriterCommandTests(unittest.TestCase):
+    def test_builds_command_with_scale_filter_and_overwrite(self) -> None:
+        writer = ffmpeg_manager.FFmpegPipeWriter(
+            out_path=Path("output.mp4"),
+            in_w=1920,
+            in_h=1080,
+            fps=30,
+            v_kbps=4000,
+            scale_filter="scale=1280:720",
+            overwrite=True,
+            ffmpeg_binary="my_ffmpeg",
+        )
+        cmd = writer._build_command()
+        self.assertEqual(cmd[0], "my_ffmpeg")
+        self.assertIn("-y", cmd)
+        self.assertIn("-vf", cmd)
+        vf_index = cmd.index("-vf")
+        self.assertEqual(cmd[vf_index + 1], "scale=1280:720")
+
 
 class FFprobeTests(unittest.TestCase):
     @patch.object(ffmpeg_manager.subprocess, "run")

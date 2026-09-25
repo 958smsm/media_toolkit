@@ -154,6 +154,14 @@ def auto_video_kbps(
     quality: str = "medium",
 ) -> int:
     """Estimate a practical target bitrate from pixels per second."""
+    if isinstance(bitrate_kbps, str):
+        candidate = bitrate_kbps.strip().lower()
+        if candidate in _CODEC_ALIASES:
+            if str(codec_family or "").strip().lower() in {"low", "medium", "high"}:
+                quality = codec_family
+            codec_family = candidate
+            bitrate_kbps = None
+
     width = max(2, int(width))
     height = max(2, int(height))
     fps = max(0.001, float(fps))

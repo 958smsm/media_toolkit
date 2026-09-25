@@ -176,8 +176,8 @@ def deduplicate_video(
         output_width,
         output_height,
         video_info.fps,
-        "hevc",
-        options.quality,
+        codec_family="hevc",
+        quality=options.quality,
     )
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -213,9 +213,11 @@ def deduplicate_video(
             fps=video_info.fps,
             v_kbps=video_kbps,
             preset=options.preset,
+            codec_family="hevc",
+            quality=options.quality,
             scale_filter=scale_filter,
             overwrite=True,
-            ffmpeg_binary=options.ffmpeg_binary,
+            ffmpeg_bin=options.ffmpeg_binary,
             logger=LOGGER,
         ).open()
         writer.write(frame)

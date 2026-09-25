@@ -44,5 +44,36 @@ class OutputTests(unittest.TestCase):
             self.assertFalse(source.exists())
 
 
+class DeduplicationIntegrationTests(unittest.TestCase):
+    def test_deduplicates_constant_frames(self) -> None:
+        import cv2, numpy as np
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_path = root / "sample.mp4"
+            output_path = root / "sample_deduped.mp4"
+
+            writer = cv2.VideoWriter(
+                str(input_path),
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                10,
+                (64, 64),
+            )
+            for _ in range(5):
+                writer.write(np.zeros((64, 64, 3), dtype=np.uint8))
+            writer.release()
+
+            result = dedupe_by_similarity.deduplicate_video(
+                input_path,
+                output_path,
+                dedupe_by_similarity.DedupeOptions(show_progress=False),
+            )
+
+            self.assertEqual(result.frames_read, 5)
+            self.assertEqual(result.frames_kept, 1)
+            self.assertTrue(output_path.is_file())
+            self.assertGreater(output_path.stat().st_size, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

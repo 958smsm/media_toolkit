@@ -85,6 +85,15 @@ def auto_video_kbps(
     The estimate is based on pixels per second and codec efficiency.  A known
     source bitrate acts as a ceiling rather than forcing an unnecessary upscale.
     """
+    if isinstance(bitrate_kbps, str):
+        candidate = bitrate_kbps.strip().lower()
+        if candidate in _CODEC_ALIASES:
+            # Caller used legacy positional signature: (width, height, fps, codec_family, quality)
+            if str(codec_family or "").strip().lower() in {"low", "medium", "high"}:
+                quality = codec_family
+            codec_family = candidate
+            bitrate_kbps = None
+
     width = max(2, int(width))
     height = max(2, int(height))
     fps = max(0.001, float(fps))
@@ -198,6 +207,9 @@ class FFmpegPipeWriter:
         pix_fmt_out: str = "yuv420p",
         close_timeout: float = 180.0,
         extra_output_args: Optional[Sequence[str]] = None,
+        scale_filter: Optional[str] = None,
+        overwrite: bool = True,
+        ffmpeg_binary: Optional[str] = None,
     ):
         self.out_path = Path(out_path)
         self.in_w = int(in_w)
@@ -210,13 +222,15 @@ class FFmpegPipeWriter:
         self.codec_family = _normalise_codec(codec_family)
         self.quality = str(quality or "medium").strip().lower()
         self.crf = None if crf in (None, "") else float(crf)
-        self.ffmpeg_bin = str(ffmpeg_bin)
+        self.ffmpeg_bin = str(ffmpeg_binary or ffmpeg_bin or "ffmpeg")
         self.logger = logger
         self.echo_stderr = bool(echo_stderr)
         self.pix_fmt_in = str(pix_fmt_in)
         self.pix_fmt_out = str(pix_fmt_out)
         self.close_timeout = max(1.0, float(close_timeout))
         self.extra_output_args = list(extra_output_args or ())
+        self.scale_filter = str(scale_filter) if scale_filter else None
+        self.overwrite = bool(overwrite)
 
         self.proc: Optional[subprocess.Popen] = None
         self._stderr_thread: Optional[threading.Thread] = None
@@ -285,9 +299,10 @@ class FFmpegPipeWriter:
 
     def _build_command(self) -> list[str]:
         fps_text = f"{self.fps:.12g}"
+        overwrite_flag = "-y" if self.overwrite else "-n"
         cmd = [
             self.ffmpeg_bin,
-            "-y",
+            overwrite_flag,
             "-hide_banner",
             "-nostdin",
             "-loglevel", "warning",
@@ -298,6 +313,10 @@ class FFmpegPipeWriter:
             "-i", "pipe:0",
             "-map", "0:v:0",
             "-an", "-sn", "-dn",
+        ]
+        if self.scale_filter:
+            cmd += ["-vf", self.scale_filter]
+        cmd += [
             *self._codec_args(),
             "-pix_fmt", self.pix_fmt_out,
             "-fps_mode", "cfr",
