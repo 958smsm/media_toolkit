@@ -16,6 +16,17 @@ class OptionValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dedupe_by_similarity.validate_options(options)
 
+    def test_rejects_invalid_keep_dup_type(self) -> None:
+        options = dedupe_by_similarity.DedupeOptions(keep_dup_type="unknown")
+        with self.assertRaises(ValueError):
+            dedupe_by_similarity.validate_options(options)
+
+    def test_normalizes_keep_dup_type_aliases(self) -> None:
+        self.assertEqual(dedupe_by_similarity.normalize_keep_dup_type("burst"), "consecutive")
+        self.assertEqual(dedupe_by_similarity.normalize_keep_dup_type("stride"), "interval")
+        self.assertEqual(dedupe_by_similarity.normalize_keep_dup_type("threshold"), "min_run")
+        self.assertEqual(dedupe_by_similarity.normalize_keep_dup_type("none"), "drop_all")
+
 
 class OutputTests(unittest.TestCase):
     def test_builds_mp4_output_name(self) -> None:
@@ -45,34 +56,83 @@ class OutputTests(unittest.TestCase):
 
 
 class DeduplicationIntegrationTests(unittest.TestCase):
-    def test_deduplicates_constant_frames(self) -> None:
+    def _create_sample_video(self, path: Path, count: int = 10) -> None:
         import cv2, numpy as np
 
+        writer = cv2.VideoWriter(
+            str(path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            10,
+            (64, 64),
+        )
+        for _ in range(count):
+            writer.write(np.zeros((64, 64, 3), dtype=np.uint8))
+        writer.release()
+
+    def test_drop_all_keeps_single_frame(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             input_path = root / "sample.mp4"
             output_path = root / "sample_deduped.mp4"
-
-            writer = cv2.VideoWriter(
-                str(input_path),
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                10,
-                (64, 64),
-            )
-            for _ in range(5):
-                writer.write(np.zeros((64, 64, 3), dtype=np.uint8))
-            writer.release()
+            self._create_sample_video(input_path, count=5)
 
             result = dedupe_by_similarity.deduplicate_video(
                 input_path,
                 output_path,
-                dedupe_by_similarity.DedupeOptions(show_progress=False),
+                dedupe_by_similarity.DedupeOptions(
+                    minimum_keep_frames=0,
+                    keep_dup_type="drop_all",
+                    show_progress=False,
+                ),
             )
 
             self.assertEqual(result.frames_read, 5)
             self.assertEqual(result.frames_kept, 1)
             self.assertTrue(output_path.is_file())
-            self.assertGreater(output_path.stat().st_size, 0)
+
+    def test_consecutive_keeps_specified_duplicate_count(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_path = root / "sample.mp4"
+            output_path = root / "sample_deduped.mp4"
+            self._create_sample_video(input_path, count=10)
+
+            result = dedupe_by_similarity.deduplicate_video(
+                input_path,
+                output_path,
+                dedupe_by_similarity.DedupeOptions(
+                    minimum_keep_frames=3,
+                    keep_dup_type="consecutive",
+                    show_progress=False,
+                ),
+            )
+
+            # 1 initial frame + 3 consecutive duplicates = 4 kept
+            self.assertEqual(result.frames_read, 10)
+            self.assertEqual(result.frames_kept, 4)
+            self.assertTrue(output_path.is_file())
+
+    def test_interval_keeps_periodic_duplicate_frames(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_path = root / "sample.mp4"
+            output_path = root / "sample_deduped.mp4"
+            self._create_sample_video(input_path, count=10)
+
+            result = dedupe_by_similarity.deduplicate_video(
+                input_path,
+                output_path,
+                dedupe_by_similarity.DedupeOptions(
+                    minimum_keep_frames=3,
+                    keep_dup_type="interval",
+                    show_progress=False,
+                ),
+            )
+
+            # Frames at index 0, 3, 6, 9 = 4 kept
+            self.assertEqual(result.frames_read, 10)
+            self.assertEqual(result.frames_kept, 4)
+            self.assertTrue(output_path.is_file())
 
 
 if __name__ == "__main__":

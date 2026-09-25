@@ -32,7 +32,8 @@ class DedupeOptions:
     pixel_tolerance: int = 8
     resize_width: int = 320
     blur_kernel_size: int = 3
-    minimum_keep_frames: int = 0
+    keep_dup_type: str = "consecutive"
+    minimum_keep_frames: int = 15
     quality: str = "medium"
     preset: str = "medium"
     max_height: int | None = None
@@ -61,6 +62,22 @@ class DedupeResult:
         return self.frames_read - self.frames_kept
 
 
+def normalize_keep_dup_type(value: str | None) -> str:
+    """Normalize duplicate retention strategy alias."""
+
+    key = str(value or "consecutive").strip().lower().replace("-", "_")
+    if key in {"consecutive", "burst", "cap", "head", "first"}:
+        return "consecutive"
+    if key in {"interval", "stride", "periodic", "step"}:
+        return "interval"
+    if key in {"min_run", "threshold", "buffer", "min-run"}:
+        return "min_run"
+    if key in {"drop_all", "none", "drop", "drop-all"}:
+        return "drop_all"
+    valid = "consecutive, interval, min_run, drop_all"
+    raise ValueError(f"unsupported keep_dup_type {value!r}; use one of: {valid}")
+
+
 def validate_options(options: DedupeOptions) -> None:
     """Validate frame comparison settings before opening a video."""
 
@@ -74,6 +91,7 @@ def validate_options(options: DedupeOptions) -> None:
         raise ValueError("Blur kernel size cannot be negative.")
     if options.minimum_keep_frames < 0:
         raise ValueError("Minimum keep frames cannot be negative.")
+    normalize_keep_dup_type(options.keep_dup_type)
 
 
 def preprocess_for_compare(
@@ -180,6 +198,9 @@ def deduplicate_video(
         quality=options.quality,
     )
 
+    keep_dup_type = normalize_keep_dup_type(options.keep_dup_type)
+    min_keep = max(0, int(options.minimum_keep_frames))
+
     output.parent.mkdir(parents=True, exist_ok=True)
     partial_output = partial_output_path(output)
     capture = cv2.VideoCapture(str(source))
@@ -224,6 +245,8 @@ def deduplicate_video(
         frames_read = 1
         frames_kept = 1
         last_kept_index = 0
+        consecutive_dup_count = 0
+        pending_duplicates: list[Any] = []
         progress.update()
 
         while True:
@@ -242,17 +265,47 @@ def deduplicate_video(
                 current_comparison,
                 options.pixel_tolerance,
             )
-            force_keep = (
-                options.minimum_keep_frames > 0
-                and frame_index - last_kept_index
-                >= options.minimum_keep_frames
-            )
-            if force_keep or similarity < options.threshold:
+            is_duplicate = similarity >= options.threshold
+
+            if not is_duplicate:
+                if pending_duplicates:
+                    if len(pending_duplicates) < min_keep:
+                        for dup_frame in pending_duplicates:
+                            writer.write(dup_frame)
+                            frames_kept += 1
+                    pending_duplicates.clear()
+
                 writer.write(frame)
                 previous_comparison = current_comparison
                 frames_kept += 1
                 last_kept_index = frame_index
+                consecutive_dup_count = 0
+            else:
+                if min_keep <= 0 or keep_dup_type == "drop_all":
+                    pass
+                elif keep_dup_type == "consecutive":
+                    if consecutive_dup_count < min_keep:
+                        writer.write(frame)
+                        frames_kept += 1
+                        last_kept_index = frame_index
+                    consecutive_dup_count += 1
+                elif keep_dup_type == "interval":
+                    if frame_index - last_kept_index >= min_keep:
+                        writer.write(frame)
+                        frames_kept += 1
+                        last_kept_index = frame_index
+                elif keep_dup_type == "min_run":
+                    if len(pending_duplicates) < min_keep:
+                        pending_duplicates.append(frame)
+
             progress.update()
+
+        if pending_duplicates:
+            if len(pending_duplicates) < min_keep:
+                for dup_frame in pending_duplicates:
+                    writer.write(dup_frame)
+                    frames_kept += 1
+            pending_duplicates.clear()
 
         writer.close()
         writer = None
@@ -321,7 +374,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-p", "--pixel-tolerance", type=int)
     parser.add_argument("-r", "--resize-width", type=int)
     parser.add_argument("-b", "--blur-kernel-size", type=int)
-    parser.add_argument("-k", "--minimum-keep-frames", type=int)
+    parser.add_argument(
+        "-K",
+        "--keep-dup-type",
+        choices=["consecutive", "interval", "min_run", "drop_all"],
+        default="consecutive",
+        help="Duplicate retention strategy: consecutive, interval, min_run, or drop_all.",
+    )
+    parser.add_argument(
+        "-k",
+        "--minimum-keep-frames",
+        "--min-duplicate-frames",
+        dest="minimum_keep_frames",
+        type=int,
+        help="Minimum duplicate frame count or interval to retain.",
+    )
     parser.add_argument(
         "-q",
         "--quality",
@@ -384,12 +451,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not input_paths:
             raise ValueError("No input videos found.")
         output_dir = Path(args.output_dir) if args.output_dir else None
+        min_frames = (
+            args.minimum_keep_frames
+            if args.minimum_keep_frames is not None
+            else getattr(args, "min_duplicate_frames", 15)
+        )
         options = DedupeOptions(
             threshold=args.threshold,
             pixel_tolerance=args.pixel_tolerance,
             resize_width=args.resize_width,
             blur_kernel_size=args.blur_kernel_size,
-            minimum_keep_frames=args.minimum_keep_frames,
+            keep_dup_type=getattr(args, "keep_dup_type", "consecutive"),
+            minimum_keep_frames=min_frames,
             quality=args.quality,
             preset=args.preset,
             max_height=args.max_height,
