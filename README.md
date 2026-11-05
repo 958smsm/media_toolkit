@@ -93,3 +93,18 @@ methods and safety behavior.
 ```powershell
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
+
+## Resize a video
+
+```powershell
+python resize_video.py -i "D:\videos\input.mp4" -o "D:\videos\resized.mp4" --width 1280 --height 720
+```
+
+The output uses the exact requested dimensions (stretching if the aspect ratio
+changes). Audio is retained and encoded as AAC. Without `--output`, the result
+is saved beside the input as `INPUT_WIDTHxHEIGHT.mp4`. Existing files are
+protected unless `--overwrite` is supplied. Odd dimensions use H.264 4:4:4;
+use even dimensions for wider player compatibility. FFmpeg must be on PATH.
+After editable installation, `media-resize` provides the same command.
+You can also set `input`, `output`, `width`, and `height` in a `resize_video`
+section of `args.yaml`.

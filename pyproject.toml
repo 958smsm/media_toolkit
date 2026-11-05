@@ -20,6 +20,7 @@ dependencies = [
 [project.scripts]
 media-bitrate = "ffmpeg_manager:main"
 media-compress = "video_compressor:main"
+media-resize = "resize_video:main"
 media-convert = "image_video_converter:main"
 media-download = "youtube_download:main"
 image-cluster = "image_similarity.cli:main"
@@ -31,6 +32,7 @@ py-modules = [
   "image_video_converter",
   "toolkit_runtime",
   "video_compressor",
+  "resize_video",
   "youtube_download",
 ]
 
