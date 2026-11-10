@@ -27,6 +27,17 @@ class BitrateTests(unittest.TestCase):
             "very-high",
         )
 
+    def test_very_high_bitrate_supported_for_all_compression_codecs(self) -> None:
+        for codec in ("h264", "hevc", "av1"):
+            with self.subTest(codec=codec):
+                high = ffmpeg_manager.auto_video_kbps(1920, 1080, 30, codec_family=codec, quality="high")
+                very_high = ffmpeg_manager.auto_video_kbps(1920, 1080, 30, codec_family=codec, quality="very-high")
+                self.assertGreater(very_high, high)
+                self.assertEqual(
+                    ffmpeg_manager.auto_video_kbps(1920, 1080, 30, codec, "very-high"),
+                    very_high,
+                )
+
     def test_auto_video_kbps_accepts_legacy_positional_arguments(self) -> None:
         expected = ffmpeg_manager.auto_video_kbps(
             1920, 1080, 30, codec_family="hevc", quality="medium"

@@ -39,9 +39,9 @@ _CODEC_ENCODERS = {
 }
 
 _BITS_PER_PIXEL = {
-    "h264": {"low": 0.07, "medium": 0.1, "high": 0.200},
-    "hevc": {"low": 0.05, "medium": 0.07, "high": 0.14},
-    "av1": {"low": 0.04, "medium": 0.06, "high": 0.12},
+    "h264": {"low": 0.07, "medium": 0.1, "high": 0.200, "very-high": 0.30},
+    "hevc": {"low": 0.05, "medium": 0.07, "high": 0.14, "very-high": 0.21},
+    "av1": {"low": 0.04, "medium": 0.06, "high": 0.12, "very-high": 0.18},
 }
 
 # _BITS_PER_PIXEL = {
@@ -89,7 +89,7 @@ def auto_video_kbps(
         candidate = bitrate_kbps.strip().lower()
         if candidate in _CODEC_ALIASES:
             # Caller used legacy positional signature: (width, height, fps, codec_family, quality)
-            if str(codec_family or "").strip().lower() in {"low", "medium", "high"}:
+            if str(codec_family or "").strip().lower() in _BITS_PER_PIXEL["h264"]:
                 quality = codec_family
             codec_family = candidate
             bitrate_kbps = None
@@ -99,8 +99,8 @@ def auto_video_kbps(
     fps = max(0.001, float(fps))
     codec = _normalise_codec(codec_family)
     quality_key = str(quality or "medium").strip().lower()
-    if quality_key not in {"low", "medium", "high"}:
-        raise ValueError("quality must be low, medium, or high")
+    if quality_key not in _BITS_PER_PIXEL[codec]:
+        raise ValueError("quality must be low, medium, high, or very-high")
 
     estimated = int(round(width * height * fps * _BITS_PER_PIXEL[codec][quality_key] / 1000.0))
     # Avoid pathological tiny streams and accidental multi-hundred-Mbit targets.
@@ -111,7 +111,7 @@ def auto_video_kbps(
     except (TypeError, ValueError):
         source = 0
     if source > 0:
-        quality_ceiling = {"low": 0.75, "medium": 1.00, "high": 1.15}[quality_key]
+        quality_ceiling = {"low": 0.75, "medium": 1.00, "high": 1.15, "very-high": 1.30}[quality_key]
         estimated = min(estimated, max(160, int(round(source * quality_ceiling))))
     return estimated
 

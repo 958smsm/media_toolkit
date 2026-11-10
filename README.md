@@ -68,6 +68,24 @@ applicable—TXT lists. Relative entries in a TXT list are resolved from that
 list's directory. Completed video outputs are published atomically so failed
 jobs do not replace a destination.
 
+## Video compression quality
+
+With `two_pass: false` (the default), `quality` selects constant-quality CRF
+encoding so bitrate can fall for simple scenes such as screen recordings.
+H.264 uses CRF 30/26/22/18 for `low`/`medium`/`high`/`very-high`; HEVC uses
+32/28/24/20 and AV1 uses 40/34/28/22. These are application defaults, and CRF
+numbers are not comparable across codecs. Lower quality gives smaller files.
+
+Previously, H.264 `medium` targeted 6,221 kbps at 1080p/30 fps even for simple
+content. `two_pass: true` retains the resolution/FPS-based bitrate mode, now
+also considering the source video bitrate when available. Two-pass encoding
+does not use CRF. Quality mode does not guarantee a particular output size.
+Completion logs report actual input/output sizes and warn if output is larger.
+
+Keep `quality: medium` and `two_pass: false` to use the new behavior. To rerun
+when an output already exists, choose another suffix, for example
+`--suffix _medium_crf`. `overwrite: false` continues to protect existing files.
+
 ## Logs and progress
 
 Each executable records debug, info, and error events under

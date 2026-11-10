@@ -1,4 +1,4 @@
-"""Compress videos with FFmpeg using resolution- and FPS-aware bitrates."""
+"""Compress videos with FFmpeg using content-aware quality settings."""
 
 from __future__ import annotations
 
@@ -22,6 +22,18 @@ from toolkit_runtime import (
 HERE = Path(__file__).resolve()
 FEATURE_NAME = HERE.stem
 LOGGER = logging.getLogger(FEATURE_NAME)
+# Larger CRF values trade visual detail for smaller files. These are application
+# defaults, not equivalent quality scores across different codecs.
+QUALITY_CRF = {
+    "h264": {"low": 30, "medium": 26, "high": 22, "very-high": 18},
+    "hevc": {"low": 32, "medium": 28, "high": 24, "very-high": 20},
+    "av1": {"low": 40, "medium": 34, "high": 28, "very-high": 22},
+}
+_AOM_PRESETS = {
+    "ultrafast": "8", "superfast": "7", "veryfast": "6",
+    "faster": "5", "fast": "4", "medium": "3",
+    "slow": "2", "slower": "1", "veryslow": "0",
+}
 VIDEO_EXTENSIONS = frozenset(
     {
         ".avi",
@@ -46,6 +58,7 @@ class VideoInfo:
     fps: float
     duration: float
     codec: str
+    bitrate_kbps: int | None = None
 
 
 @dataclass(frozen=True)
@@ -74,9 +87,12 @@ class CompressionResult:
     source_info: VideoInfo
     output_width: int
     output_height: int
-    video_kbps: int
+    video_kbps: int | None  # Target bitrate for two-pass encoding only.
     used_cuda: bool
     elapsed_seconds: float
+    crf: int | None = None
+    input_size_bytes: int = 0
+    output_size_bytes: int = 0
 
 
 def resolve_input_videos(inputs: Sequence[Path | str]) -> list[Path]:
@@ -150,12 +166,18 @@ def ffprobe_video_info(
     if fps <= 0:
         raise ValueError(f"Could not determine the frame rate for {path}.")
 
+    try:
+        bitrate_kbps = int(video_stream.get("bit_rate") or 0) // 1000
+    except (TypeError, ValueError):
+        bitrate_kbps = 0
+
     return VideoInfo(
         width=width,
         height=height,
         fps=fps,
         duration=duration,
         codec=str(video_stream.get("codec_name") or ""),
+        bitrate_kbps=bitrate_kbps if bitrate_kbps > 0 else None,
     )
 
 
@@ -283,16 +305,27 @@ def run_ffmpeg_with_progress(
 def _video_encoding_args(
     codec: str,
     preset: str,
-    video_kbps: int,
+    video_kbps: int | None,
+    *,
+    crf: int | None = None,
 ) -> list[str]:
     encoder, _container_args = CODEC_ENCODERS[codec]
+    args = ["-c:v", encoder]
+    if codec == "av1":
+        args += ["-cpu-used", _AOM_PRESETS.get(str(preset).lower(), str(preset))]
+    else:
+        args += ["-preset", preset]
+    if crf is not None:
+        args += ["-crf", str(crf)]
+        if codec == "av1":
+            args += ["-b:v", "0"]  # libaom's unconstrained quality mode.
+        return args
+    if video_kbps is None or video_kbps <= 0:
+        raise ValueError("Bitrate encoding requires a positive target bitrate.")
     maximum_rate = math.ceil(video_kbps * 1.20)
     buffer_size = math.ceil(video_kbps * 2.00)
     return [
-        "-c:v",
-        encoder,
-        "-preset",
-        preset,
+        *args,
         "-b:v",
         f"{video_kbps}k",
         "-maxrate",
@@ -331,12 +364,21 @@ def compress_video(
         source_info.height,
         options.max_height,
     )
-    video_kbps = auto_video_kbps(
-        output_width,
-        output_height,
-        source_info.fps,
-        codec_family=codec,
-        quality=quality,
+    crf = None if options.two_pass else QUALITY_CRF[codec][quality]
+    video_kbps = None
+    if options.two_pass:
+        video_kbps = auto_video_kbps(
+            output_width,
+            output_height,
+            source_info.fps,
+            bitrate_kbps=source_info.bitrate_kbps,
+            codec_family=codec,
+            quality=quality,
+        )
+    LOGGER.info(
+        "Encoding %s quality with %s",
+        quality,
+        f"CRF {crf}" if crf is not None else f"target {video_kbps} kbps (two-pass)",
     )
     hardware_args = hardware_acceleration_args(
         source,
@@ -355,7 +397,7 @@ def compress_video(
     ]
     mapping_args = ["-map", "0:v:0", "-map", "0:a?"]
     scale_args = ["-vf", scale_filter] if scale_filter else []
-    video_args = _video_encoding_args(codec, options.preset, video_kbps)
+    video_args = _video_encoding_args(codec, options.preset, video_kbps, crf=crf)
     _encoder, codec_container_args = CODEC_ENCODERS[codec]
     audio_args = ["-c:a", "aac", "-b:a", f"{options.audio_kbps}k"]
     container_args = [
@@ -444,6 +486,9 @@ def compress_video(
         video_kbps=video_kbps,
         used_cuda=bool(hardware_args),
         elapsed_seconds=time.monotonic() - started_at,
+        crf=crf,
+        input_size_bytes=source.stat().st_size,
+        output_size_bytes=output.stat().st_size,
     )
 
 
@@ -468,7 +513,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Compress videos with an automatically estimated target bitrate."
+            "Compress videos using quality-based CRF, or estimated bitrate with --two-pass."
         )
     )
     parser.add_argument(
@@ -484,6 +529,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-q",
         "--quality",
         choices=["low", "medium", "high", "very-high"],
+        help="Single-pass quality (H.264 CRF: 30, 26, 22, 18); low makes smaller files.",
     )
     parser.add_argument("-H", "--max-height", type=int)
     parser.add_argument("-a", "--audio-kbps", type=int)
@@ -492,6 +538,7 @@ def build_parser() -> argparse.ArgumentParser:
         "-2",
         "--two-pass",
         action=argparse.BooleanOptionalAction,
+        help="Use two-pass estimated bitrate instead of single-pass CRF quality.",
     )
     parser.add_argument("-g", "--hw", choices=["auto", "cpu", "cuda"])
     parser.add_argument(
@@ -584,15 +631,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.fail_fast:
                 break
             continue
+        size_change = (
+            (1 - result.output_size_bytes / result.input_size_bytes) * 100
+            if result.input_size_bytes else 0.0
+        )
         log.info(
-            "Completed %s at %dx%d, %d kbps in %.1f seconds%s",
+            "Completed %s at %dx%d: %.1f -> %.1f MiB (%.1f%% %s) in %.1f seconds%s",
             result.output_path,
             result.output_width,
             result.output_height,
-            result.video_kbps,
+            result.input_size_bytes / (1024 * 1024),
+            result.output_size_bytes / (1024 * 1024),
+            abs(size_change),
+            "smaller" if size_change >= 0 else "larger",
             result.elapsed_seconds,
             " using CUDA decoding" if result.used_cuda else "",
         )
+        if result.output_size_bytes >= result.input_size_bytes:
+            log.warning(
+                "Output is not smaller than the input; try a lower quality or max_height."
+            )
     return 1 if failures else 0
 
 
