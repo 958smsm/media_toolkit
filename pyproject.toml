@@ -23,6 +23,7 @@ media-compress = "video_compressor:main"
 media-resize = "resize_video:main"
 media-convert = "image_video_converter:main"
 media-download = "youtube_download:main"
+media-preview = "video_preview:main"
 image-cluster = "image_similarity.cli:main"
 video-dedupe = "image_similarity.dedupe_by_similarity:main"
 
@@ -32,6 +33,7 @@ py-modules = [
   "image_video_converter",
   "toolkit_runtime",
   "video_compressor",
+  "video_preview",
   "resize_video",
   "youtube_download",
 ]
